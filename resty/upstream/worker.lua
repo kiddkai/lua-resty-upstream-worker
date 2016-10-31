@@ -4,6 +4,8 @@ local ngx = require 'ngx'
 local json = require 'cjson'
 local http = require 'resty.http'
 local resolver = require 'resty.dns.resolver'
+local d = require 'resty.upstream.diff'
+local diff = d.diff
 local spawn = ngx.thread.spawn
 local resume = coroutine.resume
 local decode = json.decode
@@ -207,6 +209,12 @@ function _M.new(opts)
         return fetch_dns(opts)
     end
     return nil, 'unknown type ' .. tostring(t)
+end
+
+
+
+function _M.forwarder(opts)
+
 end
 
 

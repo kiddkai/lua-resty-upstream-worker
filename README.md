@@ -30,7 +30,7 @@ to target endpoint.
 #!/usr/local/openresty/bin/resty
 local worker = require 'resty.upstream.worker'
 
-local f1 = worker.forwarder.new({
+local f1 = worker.forwarder({
   host = '127.0.0.1',
   port = 9999,
   path = '/v1/upstreams/consul-foo'
@@ -44,7 +44,7 @@ local ct, e1 = worker.new({
     co = f1
 })
 
-local f2 = worker.forwarder.create({
+local f2 = worker.forwarder({
   host = '127.0.0.1',
   port = 9999,
   path = '/v1/upstreams/dns-bar'
@@ -59,5 +59,44 @@ local dt, e2 = worker.new({
 })
 
 ngx.thread.wait(ct, dt)
+
+--- or
+
+local w1 = {
+  source = {
+    type = worker.TYPE_DNS,
+    host = '8.8.8.8',
+    port = 53,
+    name = 'google.com',
+    co = f2
+  },
+  dest = {
+    host = '127.0.0.1',
+    port = 9999,
+    path = '/v1/upstreams/consul-foo'
+  }
+}
+
+local w2 = {
+  source = {
+    type = worker.TYPE_DNS,
+    host = '8.8.8.8',
+    port = 53,
+    name = 'google.com',
+    co = f2
+  },
+  dest = {
+    host = '127.0.0.1',
+    port = 9999,
+    path = '/v1/upstreams/consul-foo'
+  }
+}
+
+--- it will run and restart dead one's
+local stop = worker.run({
+  w1, w2
+})
+
+--- stop() to stop the task
 ```
 
