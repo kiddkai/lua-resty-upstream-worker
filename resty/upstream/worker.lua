@@ -3,6 +3,7 @@
 local ngx = require 'ngx'
 local json = require 'cjson'
 local http = require 'resty.http'
+local resolver = require 'resty.dns.resolver'
 local spawn = ngx.thread.spawn
 local resume = coroutine.resume
 local decode = json.decode
@@ -25,7 +26,7 @@ local _M = {
 local function get_json(opts)
     local client = http.new()
     local timeout = opts.timeout
-    local err, res, body
+    local ok, err, res, body
 
     ok, err = client:connect(opts.host, opts.port)
 
@@ -131,7 +132,7 @@ local function fetch_consul(opts)
         end
     end)
 
-    if not ok then
+    if not th then
         return nil, err
     end
 
@@ -140,12 +141,74 @@ end
 
 
 
+local function fetch_dns(opts)
+    if not opts.name then
+        return nil, '.name is required'
+    end
+
+    if not opts.resolver then
+        return nil, '.resolver option is required, see https://github.com/openresty/lua-resty-dns#new'
+    end
+
+    if not opts.co then
+        return nil, 'a coroutine object need to provided in the co property'
+    end
+
+
+    local r, err, answers
+    local co = opts.co
+
+    while true do
+        r, err = resolver:new(opts.resolver)
+        if not r then
+            return nil, err
+        end
+
+        if opts._id then
+            r._id = opts._id
+        end
+        answers, err = r:query(opts.name, opts.query or { qtype = r.TYPE_A })
+        if not answers then
+            return nil, err
+        end
+
+        if answers.errcode then
+            return nil, '[' .. tostring(answers.errcode) .. ']' .. answers.errstr
+        end
+
+        local result = {}
+        local ttl
+        for _, ans in ipairs(answers) do
+            if ans.type == r.TYPE_A then
+                table.insert(result, { ans.address, opts.default_port or 80 })
+            end
+            if ans.ttl then
+                ttl = ans.ttl
+            end
+        end
+        resume(co, result)
+
+        if ttl and ttl > 0 then
+            ngx.sleep(ttl)
+        else
+            --- minimum ttl, make it not query the dns server too freq...
+            ngx.sleep(1)
+        end
+    end
+end
+
+
+
 function _M.new(opts)
     local t = opts['type']
     if t == TYPE_CONSUL then
         return fetch_consul(opts)
+    elseif t == TYPE_DNS then
+        return fetch_dns(opts)
     end
     return nil, 'unknown type ' .. tostring(t)
 end
+
+
 
 return _M
