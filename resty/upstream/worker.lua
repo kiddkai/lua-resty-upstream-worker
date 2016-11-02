@@ -4,14 +4,15 @@ local ngx = require 'ngx'
 local json = require 'cjson'
 local http = require 'resty.http'
 local resolver = require 'resty.dns.resolver'
-local d = require 'resty.upstream.diff'
-local diff = d.diff
 local spawn = ngx.thread.spawn
 local resume = coroutine.resume
+local yield = coroutine.yield
 local decode = json.decode
 local encode = json.encode
 local encode_args = ngx.encode_args 
+local log = ngx.log
 
+local INFO = ngx.INFO
 local TYPE_DNS = 'DNS'
 local TYPE_CONSUL = 'CONSUL'
 local CONSUL_HEALTH_ROUTE = '/v1/health/service/'
@@ -157,46 +158,55 @@ local function fetch_dns(opts)
     end
 
 
-    local r, err, answers
+    local r, err, answers, t
     local co = opts.co
 
-    while true do
-        r, err = resolver:new(opts.resolver)
-        if not r then
-            return nil, err
-        end
-
-        if opts._id then
-            r._id = opts._id
-        end
-        answers, err = r:query(opts.name, opts.query or { qtype = r.TYPE_A })
-        if not answers then
-            return nil, err
-        end
-
-        if answers.errcode then
-            return nil, '[' .. tostring(answers.errcode) .. ']' .. answers.errstr
-        end
-
-        local result = {}
-        local ttl
-        for _, ans in ipairs(answers) do
-            if ans.type == r.TYPE_A then
-                table.insert(result, { ans.address, opts.default_port or 80 })
+    t, err = spawn(function()
+        while true do
+            r, err = resolver:new(opts.resolver)
+            if not r then
+                return nil, err
             end
-            if ans.ttl then
-                ttl = ans.ttl
+
+            if opts._id then
+                r._id = opts._id
+            end
+            answers, err = r:query(opts.name, opts.query or { qtype = r.TYPE_A })
+            if not answers then
+                return nil, err
+            end
+
+            if answers.errcode then
+                return nil, '[' .. tostring(answers.errcode) .. ']' .. answers.errstr
+            end
+
+            local result = {}
+            local ttl
+            for _, ans in ipairs(answers) do
+                if ans.type == r.TYPE_A then
+                    table.insert(result, { ans.address, opts.default_port or 80 })
+                end
+                if ans.ttl then
+                    ttl = ans.ttl
+                end
+            end
+            resume(co, result)
+
+            if ttl and ttl > 0 then
+                print('name: ', opts.name, ' ttl: ', ttl)
+                ngx.sleep(ttl)
+            else
+                --- minimum ttl, make it not query the dns server too freq...
+                ngx.sleep(1)
             end
         end
-        resume(co, result)
+    end)
 
-        if ttl and ttl > 0 then
-            ngx.sleep(ttl)
-        else
-            --- minimum ttl, make it not query the dns server too freq...
-            ngx.sleep(1)
-        end
+    if not t then
+        return nil, err
     end
+
+    return t
 end
 
 
@@ -213,10 +223,115 @@ end
 
 
 
-function _M.forwarder(opts)
+local function http_forward(opts, upstreams)
+    local client = http.new()
+    local ok, err, res, body
 
+    ok, err = client:connect(opts.host, opts.port)
+
+    if not ok then
+        return nil, err
+    end
+
+    res, err = client:request({
+        path = opts.path,
+        method = 'POST',
+        headers = {
+            ['host'] = opts.host,
+            ['content-type'] = 'application/json'
+        },
+        body = encode(upstreams)
+    })
+
+    if not res then
+        ngx.log(ngx.ERR, '[request] no res: ', err)
+        return nil, err
+    elseif res.headers['connection'] == 'close' then
+        body = res:read_body()
+        ok, err = client:close()
+        if not ok then
+            return nil, err
+        end
+    else
+        body = res:read_body()
+        client:set_keepalive()
+    end
+
+    return {
+        status = res.status,
+        body = body
+    }, err
+end
+
+
+
+function _M.forwarder(opts)
+    if not opts.host then
+        return nil, 'host is not defined'
+    end
+
+    local host = opts.host
+    local port = opts.port or 80
+    local path = opts.path or '/'
+    local res, err
+
+    local co = coroutine.create(function()
+        local upstreams
+
+        while true do
+            upstreams = yield()
+            res, err = http_forward({
+                host = host,
+                port = port,
+                path = path,
+            }, upstreams)
+
+            if not res then
+                return nil, err
+            end
+
+            if res.status >= 400 then
+                return nil, res.body
+            end
+
+            log(INFO, 'posted a new upstreams to ' .. host .. ':' .. tostring(port) .. path .. ' with data:' .. encode(upstreams))
+        end
+    end)
+
+    resume(co)
+    return co
+end
+
+
+
+local function extends(a, b)
+    local res = {}
+
+    for k, v in pairs(a) do
+        res[k] = v
+    end
+
+    for k, v in pairs(b) do
+        res[k] = v
+    end
+
+    return res
+end
+
+
+
+function _M.run(task)
+    local t, f, err
+    f = _M.forwarder(task.dest)
+    t, err = _M.new(extends(task.src, { co = f }))
+
+    if not t then
+        return nil, err
+    end
+    return t
 end
 
 
 
 return _M
+
