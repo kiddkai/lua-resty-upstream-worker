@@ -46,15 +46,13 @@ local function get_json(opts)
     if not res then
         ngx.log(ngx.ERR, '[request] no res: ', err)
         return nil, err
-    elseif res.headers['connection'] == 'close' then
-        body = res:read_body()
-        ok, err = client:close()
-        if not ok then
-            return nil, err
-        end
-    else
-        body = res:read_body()
-        client:set_keepalive()
+    end
+
+    body = res:read_body()
+    ok, err = client:close()
+
+    if not ok then
+        return nil, err
     end
 
     return {
